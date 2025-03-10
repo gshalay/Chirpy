@@ -1,7 +1,12 @@
 package auth
 
 import (
+	"fmt"
+	"net/http"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
 )
 
 func TestHashPassword(t *testing.T) {
@@ -33,12 +38,12 @@ func TestCheckPasswordHash(t *testing.T) {
 		expected error
 	}{
 		{
-			input:    "testpass1",
+			input:    init1,
 			hash:     hash1,
 			expected: nil,
 		},
 		{
-			input:    "flintocks and coal stocks.",
+			input:    init2,
 			hash:     hash2,
 			expected: nil,
 		},
@@ -55,32 +60,85 @@ func TestCheckPasswordHash(t *testing.T) {
 	}
 }
 
-// cases := []struct {
-// 	input         string
-// 	expectedPass  string
-// 	expectedError error
-// }{
-// 	{
-// 		input:         "testpass",
-// 		expectedPass:  "someString",
-// 		expectedError: nil,
-// 	},
-// 	{
-// 		input:         nil,
-// 		expectedPass:  "",
-// 		expectedError: nil,
-// 	},
-// }
+func TestMakeJWT(t *testing.T) {
+	cases := []struct {
+		inputUUID   uuid.UUID
+		inputSecret string
+		expectErr   bool
+	}{
+		{
+			inputUUID:   uuid.New(),
+			inputSecret: "someSecret",
+			expectErr:   false,
+		},
+		{
+			inputUUID:   uuid.Nil,
+			inputSecret: "someSecret",
+			expectErr:   true,
+		},
+		{
+			inputUUID:   uuid.New(),
+			inputSecret: "",
+			expectErr:   true,
+		},
+	}
 
-// for _, c := range cases {
-// 	if
+	for _, c := range cases {
+		_, err := MakeJWT(c.inputUUID, c.inputSecret, time.Hour)
 
-// 	for i := range actual {
-// 		word := actual[i]
-// 		expectedWord := c.expected[i]
+		fmt.Println(err)
 
-// 		if expectedWord != word {
-// 			t.Errorf("Expected '%s' but got '%s'.", expectedWord, word)
-// 		}
-// 	}
-// }
+		if (err == nil) == c.expectErr {
+			t.Errorf("error: result was not expected")
+		}
+	}
+}
+
+func TestValidateJWT(t *testing.T) {
+	uid := uuid.New()
+	s := "someSecret"
+	jwt, err := MakeJWT(uid, s, time.Hour)
+
+	if err != nil {
+		t.Errorf("error: %v\n", err)
+	}
+
+	validated, err := ValidateJWT(jwt, s)
+
+	if err != nil {
+		t.Errorf("error: %v", err)
+	}
+
+	if uid != validated {
+		t.Errorf("error: token invalid")
+	}
+
+}
+
+func TestGetBearerToken(t *testing.T) {
+	expected1 := "1032"
+	expected2 := "1515"
+	header := http.Header{}
+
+	header.Set("Authorization", "Bearer 1032")
+	actual1, err := GetBearerToken(header)
+	if err != nil {
+		t.Errorf("error: expected no error.")
+	}
+
+	header.Set("Authorization", "bearer 1515")
+	actual2, err := GetBearerToken(header)
+	if err != nil {
+		t.Errorf("error: expected no error.")
+	}
+
+	header.Set("Authorization", "bearer1032")
+	_, err = GetBearerToken(header)
+	if err == nil {
+		t.Errorf("error: expected error.")
+	}
+
+	if actual1 != expected1 || actual2 != expected2 {
+		t.Errorf("error: unexpected token string.")
+	}
+}

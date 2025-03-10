@@ -2,6 +2,8 @@ package auth
 
 import (
 	"fmt"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -9,8 +11,12 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+const (
+	HASH_COST = 12
+)
+
 func HashPassword(password string) (string, error) {
-	hashed, err := bcrypt.GenerateFromPassword([]byte(password), 0)
+	hashed, err := bcrypt.GenerateFromPassword([]byte(password), HASH_COST)
 	if err != nil {
 		return "", err
 	}
@@ -32,11 +38,11 @@ func MakeJWT(userID uuid.UUID, tokenSecret string, expiresIn time.Duration) (str
 	claims := jwt.RegisteredClaims{
 		Issuer:    "chirpy",
 		IssuedAt:  jwt.NewNumericDate(nowUTC),
-		ExpiresAt: jwt.NewNumericDate(nowUTC.Add(expiresIn)),
+		ExpiresAt: jwt.NewNumericDate(nowUTC.Add(expiresIn * time.Second)),
 		Subject:   userID.String()}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signedString, err := token.SignedString(tokenSecret)
+	signedString, err := token.SignedString([]byte(tokenSecret))
 	if err != nil {
 		return "", fmt.Errorf("error: %v", err)
 	}
@@ -55,7 +61,7 @@ func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 	})
 
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("error: could not validate JWT token")
+		return uuid.Nil, fmt.Errorf("%v", err)
 	}
 
 	if claims, ok := token.Claims.(*jwt.RegisteredClaims); ok && token.Valid {
@@ -68,4 +74,16 @@ func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 	} else {
 		return uuid.Nil, fmt.Errorf("error: invalid token")
 	}
+}
+
+func GetBearerToken(headers http.Header) (string, error) {
+	auth := headers.Get("Authorization")
+
+	if auth != "" && strings.Contains(auth, " ") {
+		tokenString := strings.Trim(strings.Split(auth, " ")[1], " ")
+
+		return tokenString, nil
+	}
+
+	return "", fmt.Errorf("error: no authorization header")
 }

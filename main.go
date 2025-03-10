@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -25,6 +26,7 @@ const (
 	CENSOR            = "****"
 	ERR_ENCODE_RESP   = "Error encoding response"
 	ERR_DECODE_PARAMS = "Error decoding parameters"
+	SECONDS_IN_HOUR   = 3600
 )
 
 type RequestError struct {
@@ -34,6 +36,7 @@ type RequestError struct {
 type ApiConfig struct {
 	fileServerHits atomic.Int32
 	dbQueries      *database.Queries
+	secret         string
 }
 
 func (cfg *ApiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -55,7 +58,6 @@ func getRequestError(message, logErr string) []byte {
 
 func (cfg *ApiConfig) handlerReset(respWriter http.ResponseWriter, req *http.Request) {
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
-
 	godotenv.Load()
 	platform := os.Getenv("PLATFORM")
 
@@ -95,6 +97,7 @@ func (cfg *ApiConfig) handlerMetrics(respWriter http.ResponseWriter, req *http.R
 func main() {
 	godotenv.Load()
 	dbURL := os.Getenv("DB_URL")
+
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		fmt.Printf("error: Couldn't connect to database: %s\n", err)
@@ -104,6 +107,7 @@ func main() {
 	apiCfg := ApiConfig{}
 	apiCfg.fileServerHits.Store(0)
 	apiCfg.dbQueries = database.New(db)
+	apiCfg.secret = os.Getenv("SECRET")
 
 	mux := http.NewServeMux()
 	mux.Handle("/app/", apiCfg.middlewareMetricsInc(http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
@@ -117,7 +121,10 @@ func main() {
 	mux.HandleFunc("POST /api/users", apiCfg.handlerUsers)
 	httpServer := http.Server{Handler: mux, Addr: ":8080"}
 
-	httpServer.ListenAndServe()
+	err = httpServer.ListenAndServe()
+	if err != nil {
+		fmt.Printf("Couldn't start server: %v\n", err)
+	}
 }
 
 func handlerHealthz(respWriter http.ResponseWriter, req *http.Request) {
@@ -139,8 +146,7 @@ func middlewareLog(next http.Handler) http.Handler {
 
 func (cfg *ApiConfig) handlerChirps(respWriter http.ResponseWriter, req *http.Request) {
 	type RequestParameters struct {
-		Body   string `json:"body"`
-		UserId string `json:"user_id"`
+		Body string `json:"body"`
 	}
 
 	type RequestSuccess struct {
@@ -169,6 +175,23 @@ func (cfg *ApiConfig) handlerChirps(respWriter http.ResponseWriter, req *http.Re
 			return
 		}
 
+		// Check Auth Token
+		token, err := auth.GetBearerToken(req.Header)
+		if err != nil {
+			retVal := getRequestError("error: couldn't fetch auth token", "error encoding response")
+			respWriter.WriteHeader(401)
+			respWriter.Write(retVal)
+			return
+		}
+
+		tokenUUID, err := auth.ValidateJWT(token, cfg.secret)
+		if err != nil {
+			retVal := getRequestError(fmt.Sprintf("invalid auth token: %v", err), "authentication failed")
+			respWriter.WriteHeader(401)
+			respWriter.Write(retVal)
+			return
+		}
+
 		words_to_censor := []string{"kerfuffle", "sharbert", "fornax"}
 		pattern := `\\s+`
 		re := regexp.MustCompile(pattern)
@@ -190,15 +213,7 @@ func (cfg *ApiConfig) handlerChirps(respWriter http.ResponseWriter, req *http.Re
 			cleaned_body += to_add
 		}
 
-		uid, err := uuid.Parse(params.UserId)
-		if err != nil {
-			retVal := getRequestError("error: user id invalid", "Error encoding response.")
-			respWriter.WriteHeader(400)
-			respWriter.Write(retVal)
-			return
-		}
-
-		createParams := database.CreateChirpParams{Body: params.Body, UserID: uid}
+		createParams := database.CreateChirpParams{Body: params.Body, UserID: tokenUUID}
 		createdChirp, err := cfg.dbQueries.CreateChirp(req.Context(), createParams)
 		if err != nil {
 			retVal := getRequestError("error: user id invalid", "Error encoding response.")
@@ -207,7 +222,7 @@ func (cfg *ApiConfig) handlerChirps(respWriter http.ResponseWriter, req *http.Re
 			return
 		}
 
-		success := RequestSuccess{Id: createdChirp.ID.String(), Body: createParams.Body, CreatedAt: createdChirp.CreatedAt.String(), UpdatedAt: createdChirp.UpdatedAt.String(), UserId: params.UserId}
+		success := RequestSuccess{Id: createdChirp.ID.String(), Body: createParams.Body, CreatedAt: createdChirp.CreatedAt.String(), UpdatedAt: createdChirp.UpdatedAt.String(), UserId: tokenUUID.String()}
 		retVal, err := json.Marshal(success)
 		if err != nil {
 			log.Printf("Error encoding parameters: %s", err)
@@ -221,8 +236,9 @@ func (cfg *ApiConfig) handlerChirps(respWriter http.ResponseWriter, req *http.Re
 
 func (cfg *ApiConfig) handlerUsers(respWriter http.ResponseWriter, req *http.Request) {
 	type RequestParameters struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email            string `json:"email"`
+		Password         string `json:"password"`
+		ExpiresInSeconds string `json:"expires_in_seconds"`
 	}
 
 	type RequestSuccess struct {
@@ -250,7 +266,7 @@ func (cfg *ApiConfig) handlerUsers(respWriter http.ResponseWriter, req *http.Req
 			return
 		}
 
-		hash, err := auth.HashPassword(params.Password)
+		hashedPassword, err := auth.HashPassword(params.Password)
 		if err != nil {
 			retVal := getRequestError("error: couldn't create user by email.", "Error encoding parameters.")
 			respWriter.WriteHeader(400)
@@ -258,7 +274,7 @@ func (cfg *ApiConfig) handlerUsers(respWriter http.ResponseWriter, req *http.Req
 			return
 		}
 
-		createdUser, err := cfg.dbQueries.CreateUser(req.Context(), database.CreateUserParams{Email: params.Email, HashedPassword: hash})
+		createdUser, err := cfg.dbQueries.CreateUser(req.Context(), database.CreateUserParams{Email: params.Email, HashedPassword: hashedPassword})
 		if err != nil {
 			retVal := getRequestError("error: couldn't create user by email.", "Error encoding parameters.")
 			respWriter.WriteHeader(400)
@@ -345,8 +361,9 @@ func (cfg *ApiConfig) handlerGetChirpById(respWriter http.ResponseWriter, req *h
 
 func (cfg *ApiConfig) handlerLogin(respWriter http.ResponseWriter, req *http.Request) {
 	type RequestParameters struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email            string `json:"email"`
+		Password         string `json:"password"`
+		ExpiresInSeconds int    `json:"expires_in_seconds"`
 	}
 
 	type RequestSuccess struct {
@@ -354,6 +371,7 @@ func (cfg *ApiConfig) handlerLogin(respWriter http.ResponseWriter, req *http.Req
 		CreatedAt string `json:"created_at"`
 		UpdatedAt string `json:"updated_at"`
 		Email     string `json:"email"`
+		Token     string `json:"token"`
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -390,14 +408,21 @@ func (cfg *ApiConfig) handlerLogin(respWriter http.ResponseWriter, req *http.Req
 			return
 		}
 
+		expiresInSeconds := params.ExpiresInSeconds
+
+		if expiresInSeconds <= 0 || expiresInSeconds > SECONDS_IN_HOUR {
+			expiresInSeconds = SECONDS_IN_HOUR
+		}
+
+		token, err := auth.MakeJWT(existingUser.ID, cfg.secret, time.Duration(expiresInSeconds))
 		if err != nil {
-			retVal := getRequestError("error: couldn't create user by email.", "Error encoding parameters.")
+			retVal := getRequestError("error: couldn't create authentication token.", "Error encoding parameters.")
 			respWriter.WriteHeader(400)
 			respWriter.Write(retVal)
 			return
 		}
 
-		success := RequestSuccess{Id: existingUser.ID.String(), CreatedAt: existingUser.CreatedAt.String(), UpdatedAt: existingUser.UpdatedAt.String(), Email: existingUser.Email}
+		success := RequestSuccess{Id: existingUser.ID.String(), CreatedAt: existingUser.CreatedAt.String(), UpdatedAt: existingUser.UpdatedAt.String(), Email: existingUser.Email, Token: token}
 		retVal, err := json.Marshal(success)
 		if err != nil {
 			log.Printf("Error encoding parameters: %s", err)
