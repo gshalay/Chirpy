@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 )
@@ -84,7 +83,7 @@ func TestMakeJWT(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		_, err := MakeJWT(c.inputUUID, c.inputSecret, time.Hour)
+		_, err := MakeJWT(c.inputUUID, c.inputSecret)
 
 		fmt.Println(err)
 
@@ -97,7 +96,7 @@ func TestMakeJWT(t *testing.T) {
 func TestValidateJWT(t *testing.T) {
 	uid := uuid.New()
 	s := "someSecret"
-	jwt, err := MakeJWT(uid, s, time.Hour)
+	jwt, err := MakeJWT(uid, s)
 
 	if err != nil {
 		t.Errorf("error: %v\n", err)

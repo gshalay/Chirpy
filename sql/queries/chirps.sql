@@ -16,3 +16,7 @@ ORDER BY created_at ASC;
 SELECT chirps.id, chirps.created_at, chirps.updated_at, chirps.body, chirps.user_id FROM chirps
 WHERE id = $1
 LIMIT 1;
+
+-- name: DeleteChirpById :exec
+DELETE FROM chirps
+WHERE id = $1;
